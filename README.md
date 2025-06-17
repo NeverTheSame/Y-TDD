@@ -62,7 +62,7 @@
 Ниже представлена общая схема, описывающая исходное состояние в AWS, процесс миграции и целевую архитектуру в GCP.
 
 ```mermaid
-graph TD;
+graph TD
     subgraph "Исходная среда: AWS"
         direction LR
         A_AD[("On-Prem<br>Active Directory")]
@@ -84,18 +84,26 @@ graph TD;
         G_AD[("On-Prem<br>Active Directory")]
         G_GCE("~100 Compute Engine<br>(Windows, AD-Joined, Rightsized)")
         G_GKE["GKE Cluster<br>(Managed Kubernetes)"]
-        G_CloudSQL[("Cloud SQL<br>MySQL for credentials")]
         G_GCS[("Google Cloud Storage<br>File storage")]
         G_CloudDNS[("Cloud DNS<br>Внутренние A-записи")]
         G_Warp[("Cloudflare Warp<br>VPN Access")]
 
         subgraph "Tools Service on GKE"
             G_Django("Django App")
-            G_Django --> G_CloudSQL;
+            G_InfluxDB("InfluxDB<br>для метрик")
+            G_Grafana("Grafana<br>для визуализации")
+            G_MySQLK8s[("MySQL on K8s<br>for credentials")]
+            
+            G_Django --> G_MySQLK8s;
             G_Django --> G_GCS;
+            G_InfluxDB --> G_MySQLK8s; %% Assuming InfluxDB might also use MySQL for something, or remove if not. If just metrics, remove.
+            G_Grafana --> G_InfluxDB;
         end
 
         G_GKE -- hosts --> G_Django;
+        G_GKE -- hosts --> G_InfluxDB;
+        G_GKE -- hosts --> G_Grafana;
+        G_GKE -- hosts --> G_MySQLK8s;
         G_AD <--> G_GCE;
         G_Users("Сотрудники") -- VPN --> G_Warp;
         G_Warp --> G_GCE;
