@@ -99,10 +99,10 @@ graph TD
             G_Grafana --> G_InfluxDB;
         end
 
-        G_GKE -- hosts --> G_Django;
-        G_GKE -- hosts --> G_InfluxDB;
-        G_GKE -- hosts --> G_Grafana;
-        G_GKE -- hosts --> G_MySQLK8s;
+        G_GKE --> G_Django;
+        G_GKE --> G_InfluxDB;
+        G_GKE --> G_Grafana;
+        G_GKE --> G_MySQLK8s;
         G_AD <--> G_GCE;
         G_Users("Сотрудники") -- VPN --> G_Warp;
         G_Warp --> G_GCE;
