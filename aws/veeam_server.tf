@@ -1,5 +1,5 @@
 resource "aws_instance" "veeam_server" {
-  count         = 10 # создал 10 серверов для параллельного бэкапа
+  count         = 10 # создал 10 независимых серверов Veeam
   ami           = "ami-0c55b159cbfafe1f0"
   instance_type = "t3.large"
   key_name      = "aws-key"
@@ -7,10 +7,9 @@ resource "aws_instance" "veeam_server" {
 
   tags = {
     Name = "Veeam-Server-${count.index + 1}"
-    Role = "Backup"
+    Role = "BackupPrimary"
   }
 
-  # использовал provisioner для вызова Ansible после создания инстанса
   provisioner "remote-exec" {
     inline = [
       "powershell.exe -Command \"Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope LocalMachine -Force\"",
@@ -24,6 +23,8 @@ resource "aws_instance" "veeam_server" {
     }
   }
 
+  # provisioner будет запускать Ansible плейбук на КАЖДОМ из 10 инстансов
+  # передаю только IP текущего инстанса в инвентарь Ansible
   provisioner "local-exec" {
     command = "ansible-playbook -i '${self.public_ip},' --user Administrator --extra-vars 'ansible_password=${var.admin_password}' ./install_veeam.yml"
   }

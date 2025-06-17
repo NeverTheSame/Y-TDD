@@ -1,25 +1,181 @@
----
 - name: Configure Veeam Backup & Replication Server
   hosts: all
-  gather_facts: no
+  gather_facts: no # yes, чтобы получить информацию о хосте, если она нужна, опущу
+
+  vars:
+    veeam_iso_url: 'https://download.veeam.com/VeeamBackup&Replication_11.0.1.1261_20211211.iso'
+    veeam_install_path: 'C:\Temp\veeam_installer.iso'
+    veeam_install_dir: 'C:\Temp'
+    nfs_gateway_ip: 's3-gateway.local'
+    nfs_share_path: '\\s3-gateway.local\backups'
+    nfs_mount_drive_letter: 'Z:'
+    aws_access_key: "YOUR_AWS_ACCESS_KEY" # в продакшене использую безопасный метод
+    aws_secret_key: "YOUR_AWS_SECRET_KEY"
+    veeam_aws_credentials_name: "AWS_EC2_Credentials"
+    gcs_bucket_name: "migration-raw-images-bucket"
+    gcs_service_account_key_path: "C:\veeam_config\gcs_sa_key.json" # ключ SA
 
   tasks:
+    - name: Ensure Temp directory exists
+      win_file:
+        path: C:\Temp
+        state: directory
+
     - name: Download Veeam B&R Installer
       win_get_url:
-        url: 'https://download.veeam.com/VeeamBackup&Replication_11.0.1.1261_20211211.iso'
-        dest: 'C:\Temp\veeam_installer.iso'
+        url: '{{ veeam_iso_url }}'
+        dest: '{{ veeam_install_path }}'
 
     - name: Mount Veeam ISO
       win_mount_iso:
-        iso_path: 'C:\Temp\veeam_installer.iso'
+        iso_path: '{{ veeam_install_path }}'
       register: mount_result
 
     - name: Install Veeam B&R silently
       win_command: '{{ mount_result.drive_letter }}:\Backup\Setup.exe /silent /accepteula'
       args:
-        chdir: 'C:\Temp'
+        chdir: '{{ veeam_install_dir }}'
+      win_powershell: Add-PSSnapin Veeam.Backup.PowerShell; Enable-VBRRestApi; # включаю REST API
 
     - name: Configure NFS mount for S3 backups
       win_shell: |
-        # монтировал NFS-шару, смотрящую на S3
-        mount -o nolock,mtype=hard \\s3-gateway.local\backups Z:
+        # монтирую NFS-шару, смотрящую на S3
+        mount -o nolock,mtype=hard {{ nfs_share_path }} {{ nfs_mount_drive_letter }}
+      args:
+        executable: powershell.exe
+
+    # --- после установки ---
+    - name: Wait for Veeam services to start
+      win_service:
+        name: 'Veeam Backup Service'
+        state: started
+        wait_for_status: yes
+      timeout: 300
+
+    # 1. добавил учетки AWS в Veeam
+    - name: Add AWS credentials to Veeam
+      win_powershell: |
+        $credName = "AWS_EC2_Credentials"
+        $existingCred = Get-VBRCredentials | Where-Object {$_.Name -eq $credName}
+        if (-not $existingCred) {
+            Add-VBRCredentials -Name $credName -AmazonAccessKey "{{ aws_access_key }}" -AmazonSecretKey "{{ aws_secret_key }}" -Description "Credentials for AWS EC2 instances"
+        }
+      args:
+        executable: powershell.exe
+
+    # 2. добавил репозиторий
+    - name: Add NFS repository to Veeam
+      win_powershell: |
+        $repoName = "S3_NFS_Repo"
+        $mountPath = "{{ nfs_mount_drive_letter }}"
+        $existingRepo = Get-VBRBackupRepository | Where-Object {$_.Path -eq $mountPath -and $_.Type -eq "SMB"}
+        if (-not $existingRepo) {
+            Add-VBRBackupRepository -WindowsPath $mountPath -Name $repoName -Description "NFS Share for S3 backups"
+        }
+      args:
+        executable: powershell.exe
+
+    # 3. добавил AWS EC2 инстансы в качестве управляемых серверов
+    # КАЖДЫЙ из 10 Veeam серверов будет бэкапить СВОИ 10 ВМ на каждом есть переменная `vms_for_this_server`
+    # так же можно передать список ID ВМ через extra-vars Ansible, например:
+    # ansible-playbook ... --extra-vars "backup_vm_ids=['i-001','i-002',...]"
+
+    - name: Define VMs for this specific Veeam server (PLACEHOLDER)
+      set_fact:
+        # ПРИМЕР: для сервера "Veeam-Server-1" - свои 10 ВМ, для "Veeam-Server-2" - свои 10 ВМ.
+        vms_to_backup_on_this_server:
+          - "i-0123456789abcdef0" # VM 1
+          - "i-0123456789abcdef1" # VM 2
+          # ... до 10 VM
+          - "i-0123456789abcdef9" # VM 10
+      run_once: yes
+
+    - name: Add AWS EC2 instances to Veeam Infrastructure
+      win_powershell: |
+        $vms = @(
+          "{{ vms_to_backup_on_this_server[0] }}",
+          "{{ vms_to_backup_on_this_server[1] }}"
+          # ... добавил все 10 ВМ здесь
+        )
+        $credentials = Get-VBRCredentials -Name "AWS_EC2_Credentials"
+
+        foreach ($vmId in $vms) {
+            $existingServer = Get-VBRCloudServer -Name $vmId -ErrorAction SilentlyContinue
+            if (-not $existingServer) {
+                Add-VBRCloudServer -AmazonEc2InstanceId $vmId -Name $vmId -Description "AWS EC2 Instance $vmId" -Credentials $credentials
+            }
+        }
+      args:
+        executable: powershell.exe
+
+    # 4. создал бекап
+    - name: Create Backup Job for this Veeam server and start it
+      win_powershell: |
+        $jobName = "EC2_Backup_Job_{{ ansible_hostname | replace('-', '_') }}" 
+        $repo = Get-VBRBackupRepository -Name "S3_NFS_Repo"
+        $credentials = Get-VBRCredentials -Name "{{ veeam_aws_credentials_name }}" 
+        
+        $vmsForJob = @()
+        {% for vm_id in backup_vm_ids %}
+        $vm = Get-VBRCloudServer -Name "{{ vm_id }}" -ErrorAction SilentlyContinue
+        if ($vm) {
+            $vmsForJob += $vm
+        } else {
+            Write-Warning "VM '{{ vm_id }}' not found in Veeam infrastructure. Skipping for this job."
+        }
+        {% endfor %}
+        
+        if ($vmsForJob.Count -gt 0) {
+            $existingJob = Get-VBRJob | Where-Object {$_.Name -eq $jobName}
+            if (-not $existingJob) {
+                Write-Host "Creating new backup job '$jobName'..."
+                # Создаем новую задачу CloudInstance Backup
+                $newJob = New-VBRJob -Name $jobName -BackupTarget $repo -Source $vmsForJob -Type CloudInstance `
+                                     -BackupMode Incremental -RestorePointPolicy KeepLast -RestorePoints 7 `
+                                     -EnableGuestProcessing:$false # По умолчанию отключаем обработку гостевой ОС для простоты
+        
+                # стартую бекап сразу
+                if ($newJob) {
+                    Start-VBRJob -Job $newJob
+                    Write-Host "Backup job '$jobName' created and started successfully."
+                } else {
+                    # Если New-VBRJob не вернул объект (что маловероятно при успехе)
+                    Write-Error "Failed to create backup job '$jobName'. Cannot start."
+                }
+            } else {
+                Write-Host "Backup job '$jobName' already exists. Starting existing job."
+                Start-VBRJob -Job $existingJob
+                Write-Host "Existing backup job '$jobName' started successfully."
+            }
+        } else {
+            Write-Warning "No valid VMs found for backup job '$jobName'. Skipping job creation and start."
+        }
+      args:
+        executable: powershell.exe
+      when: backup_vm_ids is defined and backup_vm_ids | length > 0
+
+    # монтирую Google Cloud Storage bucket
+    - name: Mount Google Cloud Storage bucket as Y drive
+      win_powershell: |
+        $bucketName = "{{ gcs_bucket_name }}" 
+        $driveLetter = "Y:"
+        $serviceAccountKeyPath = "C:\veeam_config\gcs_sa_key.json" 
+  
+        # проверяю, существует ли диск Y:
+        if (-not (Test-Path -Path "${driveLetter}:")) {
+            Write-Host "Mounting GCS bucket '$bucketName' as drive '$driveLetter'..."
+            Mount-GcsBucket -BucketName $bucketName -DriveLetter $driveLetter -ServiceAccountKeyPath $serviceAccountKeyPath
+        } else {
+            Write-Host "Drive '$driveLetter' (GCS bucket) is already mounted."
+        }
+      args:
+        executable: powershell.exe
+
+    # запускаю скрипт конвертации дисков
+    - name: Run parallel disk conversion script
+      win_command: python C:\scripts\convert_disks.py
+      args:
+        chdir: C:\scripts # там уже должен быть convert_disks.py
+      register: conversion_output
+    - debug:
+        var: conversion_output.stdout_lines

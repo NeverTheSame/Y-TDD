@@ -68,13 +68,15 @@ graph TD;
         A_AD[("On-Prem<br>Active Directory")]
         A_EC2("~100 EC2 Instances<br>(Windows, AD-Joined)")
         A_Tools["Linux VM<br>(Docker Compose, InfluxDB, Local Storage)"]
-        A_Veeam("10 x Veeam B&R<br>(Free Tier, развернуты через Terraform)")
+        A_Veeam("10 x Независимых Veeam B&R<br>(Free Tier, развернуты через Terraform)")
         A_S3[("S3 Bucket<br>Хранилище бэкапов")]
+        A_NFSGW[("NFS Gateway<br>для доступа к S3")]
 
         A_AD <--> A_EC2;
         A_EC2 --> A_Veeam;
         A_Tools --> A_Veeam;
-        A_Veeam -- NFS Mount --> A_S3;
+        A_Veeam -- NFS Mount --> A_NFSGW;
+        A_NFSGW --> A_S3;
     end
 
     subgraph "Целевая среда: GCP"
@@ -103,19 +105,24 @@ graph TD;
 
     subgraph "Процесс миграции"
         direction TB
-        P1["Бэкап ВМ в S3<br>(Python + Veeam API)"]
-        P2["Конвертация дисков<br>(qemu-img convert .vmdk -> .raw)"]
-        P3["Загрузка RAW образов в GCS"]
-        P4["Развертывание инфраструктуры в GCP<br>(Terraform + Terragrunt)"]
-        P5["Перенастройка сети и AD<br>(PowerShell Remoting)"]
+        P_PrepVeeam["Предварительная настройка Veeam серверов<br>(Ansible: установка, NFS mount, добавление credentials/repo, создание job)"]
+        P_TriggerBackup["Запуск задач бэкапа<br>(Python скрипт для каждого из 10 Veeam серверов)"]
+        P_S3Backup["Бэкап ВМ в S3<br>(выполняется 10x Veeam B&R)"]
+        P_Convert["Конвертация дисков<br>(Python + многопоточность qemu-img)"]
+        P_Upload["Загрузка RAW образов в GCS"]
+        P_InfraDeploy["Развертывание инфраструктуры в GCP<br>(Terraform + Terragrunt)"]
+        P_NetworkAD["Перенастройка сети и AD<br>(PowerShell Remoting)"]
     end
 
-    A_S3 --> P1;
-    A_S3 --> P2;
-    P2 --> P3;
-    P3 --> P4;
-    P4 --> G_GCE;
-    G_GCE -- Post-config --> P5;
+    A_Veeam --> P_PrepVeeam;
+    P_PrepVeeam --> P_TriggerBackup;
+    P_TriggerBackup --> P_S3Backup;
+    P_S3Backup --> A_S3;
+    A_S3 --> P_Convert;
+    P_Convert --> P_Upload;
+    P_Upload --> P_InfraDeploy;
+    P_InfraDeploy --> G_GCE;
+    G_GCE -- Post-config --> P_NetworkAD;
 ```
 
 ---
@@ -148,6 +155,13 @@ Veeam Backup & Replication. Такая автоматизация облегча
 настройки серверов Veeam Backup & Replication в AWS. Используется комбинация Terraform для 
 выделения инфраструктуры и Ansible для конфигурации программного обеспечения.
 
+Архитектура бэекапа спроектирована с учетом масштабирования и параллелизма. Для обеспечения
+эффективного бэкапа ~100 виртуальных машин, развернуто 10 независимых серверов Veeam Backup
+& Replication. Каждый такой сервер отвечает за резервное копирование своей группы из ~10
+виртуальных машин, что позволяет выполнять множество операций бэкапа конкурентно, значительно
+сокращая общее окно резервного копирования. Такой подход демонстрирует применение концепций
+распределенного параллелизма для оптимизации производительности.
+
 **Terraform (`aws/veeam_server.tf`):**
 
 - [aws/veeam_server.tf](./aws/veeam_server.tf) 
@@ -156,7 +170,25 @@ Veeam Backup & Replication. Такая автоматизация облегча
 
 - [aws/install_veeam.yml](./aws/install_veeam.yml) 
 
-#### **4. IaC: Иерархическая структура в GCP (Terragrunt + Terraform)**
+#### **4. Конвертация дисков (Python + мультипроцессинг qemu-img)**
+Шаг конвертации дисковых образов (.vmdk в .raw) является потенциальным узким местом, особенно
+при большом количестве машин. Для сокращения времени конвертации и, как следствие, уменьшения
+downtime, реализована параллельная обработка образов.
+После завершения резервного копирования на каждом из 10 серверов Veeam, запускается Python
+скрипт, который оркеструет процесс конвертации. Скрипт использует многопоточность (например,
+с помощью библиотеки multiprocessing) для одновременного запуска нескольких процессов qemu-img
+convert. Это позволяет эффективно использовать ресурсы машины и значительно ускорить 
+конвертацию всех образов по сравнению с последовательной обработкой.
+
+- [aws/convert_disks.py](./aws/convert_disks.py) 
+
+**Преимущества параллельной конвертации:**
+
+- **Сокращение времени миграции:** Параллельная обработка значительно уменьшает общее время, необходимое для конвертации всех дисков.
+- **Эффективное использование ресурсов:** Многопоточность позволяет полностью использовать доступные ресурсы CPU и дисковой подсистемы.
+- Дальнейшие улучшения могут включать динамическое масштабирование количества потоков в зависимости от доступных ресурсов и приоритезацию конвертации критически важных виртуальных машин.
+
+#### **5. IaC: Иерархическая структура в GCP (Terragrunt + Terraform)**
 
 **Структура папок:**
 
