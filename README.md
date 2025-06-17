@@ -103,11 +103,11 @@ graph TD;
 
     subgraph "Процесс миграции"
         direction TB
-        P1["1. Бэкап ВМ в S3<br>(Python + Veeam API)"]
-        P2["2. Конвертация дисков<br>(qemu-img convert .vmdk -> .raw)"]
-        P3["3. Загрузка RAW образов в GCS"]
-        P4["4. Развертывание инфраструктуры в GCP<br>(Terraform + Terragrunt)"]
-        P5["5. Перенастройка сети и AD<br>(PowerShell Remoting)"]
+        P1["Бэкап ВМ в S3<br>(Python + Veeam API)"]
+        P2["Конвертация дисков<br>(qemu-img convert .vmdk -> .raw)"]
+        P3["Загрузка RAW образов в GCS"]
+        P4["Развертывание инфраструктуры в GCP<br>(Terraform + Terragrunt)"]
+        P5["Перенастройка сети и AD<br>(PowerShell Remoting)"]
     end
 
     A_S3 --> P1;
