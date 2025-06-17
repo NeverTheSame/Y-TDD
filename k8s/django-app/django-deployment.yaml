@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: django-tools-app
+  labels:
+    app: django-tools
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: django-tools
+  template:
+    metadata:
+      labels:
+        app: django-tools
+    spec:
+      containers:
+      - name: django-app
+        image: gcr.io/gcp-project-id/tools-app:v1 # из CI/CD пайплайна, загруженный в Container Registry
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_HOST
+          value: "mysql-service.default.svc.cluster.local" # внутренний DNS Kubernetes для доступа к сервису MySQL
+        - name: GCS_BUCKET_NAME
+          value: "company-tools-uploads"
+        - name: DJANGO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: django-secrets
+              key: secret_key

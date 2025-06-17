@@ -1,0 +1,53 @@
+name: Build and Push to Google Container Registry
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# переменные окружения, доступные для всех шагов в задании
+env:
+  GCP_PROJECT_ID: gcp-project-id
+  IMAGE_NAME: tools-app
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+
+    # права доступа, необходимые для аутентификации в GCP через Workload Identity Federation
+    # это простой и безопасный способ, не требующий хранения долгоживущих ключей сервис-аккаунтов
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          # провайдер Workload Identity и сервисный аккаунт, настроенные в GCP
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }} # Например: projects/123456789/locations/global/workloadIdentityPools/my-pool/providers/my-provider
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}      # Например: sa@mgcp-project-id.iam.gserviceaccount.com
+
+      - name: Login to Google Container Registry
+        # Этот шаг использует токен, полученный на шаге аутентификации, для входа в Docker
+        uses: docker/login-action@v3
+        with:
+          registry: gcr.io
+          username: _json_key
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: . # Использовать текущую директорию для Dockerfile
+          push: true # Не только собрать, но и отправить в registry
+          tags: |
+            gcr.io/${{ env.GCP_PROJECT_ID }}/${{ env.IMAGE_NAME }}:latest
+            gcr.io/${{ env.GCP_PROJECT_ID }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          # Тагаю образ как 'latest' и по SHA коммита для точной идентификации версии

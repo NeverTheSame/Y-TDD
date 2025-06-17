@@ -1,0 +1,25 @@
+---
+- name: Configure Veeam Backup & Replication Server
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Download Veeam B&R Installer
+      win_get_url:
+        url: 'https://download.veeam.com/VeeamBackup&Replication_11.0.1.1261_20211211.iso'
+        dest: 'C:\Temp\veeam_installer.iso'
+
+    - name: Mount Veeam ISO
+      win_mount_iso:
+        iso_path: 'C:\Temp\veeam_installer.iso'
+      register: mount_result
+
+    - name: Install Veeam B&R silently
+      win_command: '{{ mount_result.drive_letter }}:\Backup\Setup.exe /silent /accepteula'
+      args:
+        chdir: 'C:\Temp'
+
+    - name: Configure NFS mount for S3 backups
+      win_shell: |
+        # монтировал NFS-шару, смотрящую на S3
+        mount -o nolock,mtype=hard \\s3-gateway.local\backups Z:
