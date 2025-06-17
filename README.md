@@ -96,7 +96,6 @@ graph TD
             
             G_Django --> G_MySQLK8s;
             G_Django --> G_GCS;
-            G_InfluxDB --> G_MySQLK8s; %% Assuming InfluxDB might also use MySQL for something, or remove if not. If just metrics, remove.
             G_Grafana --> G_InfluxDB;
         end
 
